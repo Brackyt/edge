@@ -182,8 +182,9 @@ List<int> gen5GetClockPayload() => const [revision1];
 /// IMU_SET_DATA_STREAM (0x6A) body — gen4 is a bare on/off byte; gen5 requires
 /// a leading [revision1] (fw 50.40.1.0 console: `Invalid rev (0) for
 /// WSBLE_CMD_IMU_SET_DATA_STREAM` when body is `[0x01]` / `[0x00]` alone).
-/// Same revision role as SET_CLOCK / optical. Without this the 100 Hz 0x33
-/// IMU stream never arms, so step calibration / live workout steps stay 0.
+/// Same revision role as SET_CLOCK / optical. Without this the live IMU
+/// stream never arms (gen4: 0x33; gen5 Maverick: 0x2B rec 0x15), so step
+/// calibration / live workout steps stay 0.
 @visibleForTesting
 List<int> imuModePayload(bool on, {required bool isGen5}) => isGen5
     ? <int>[revision1, on ? 0x01 : 0x00]

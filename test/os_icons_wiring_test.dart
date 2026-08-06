@@ -168,6 +168,8 @@ void main() {
           onEditTimes: () {},
           onConfirmFallback: () {},
           onClearOverride: () {},
+          onDismissSleep: () {},
+          onUndoSuppress: () {},
         ),
       ));
       await t.pump(const Duration(milliseconds: 1200));

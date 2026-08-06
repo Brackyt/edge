@@ -201,6 +201,43 @@ class _SleepDetailScreenState extends State<SleepDetailScreen> {
     await _runOverride(() => app.clearSleepOverride(widget.date));
   }
 
+  Future<void> _dismissSleep() async {
+    num? n(Object? v) => v is num ? v : (v is String ? num.tryParse(v) : null);
+    final onset = n(_data['onset_ts'])?.toInt();
+    final wake = n(_data['wake_ts'])?.toInt();
+    if (onset == null || wake == null || wake <= onset) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove this sleep?'),
+        content: const Text(
+          'This block will be removed. Other sleep on this day can still '
+          'appear if detected. You can undo removals later.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Remove sleep'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final app = context.read<AppState>();
+    final start = DateTime.fromMillisecondsSinceEpoch(onset * 1000);
+    final end = DateTime.fromMillisecondsSinceEpoch(wake * 1000);
+    await _runOverride(() => app.dismissSleepPeriod(widget.date, start, end));
+  }
+
+  Future<void> _undoSuppress() async {
+    final app = context.read<AppState>();
+    await _runOverride(() => app.clearSleepSuppress(widget.date));
+  }
+
   /// Run a sleep-override change with a busy state, then reload this night.
   Future<void> _runOverride(Future<void> Function() action) async {
     setState(() => _phase = _Phase.loading);
@@ -218,6 +255,19 @@ class _SleepDetailScreenState extends State<SleepDetailScreen> {
   List<Widget> _sections() {
     if (_phase == _Phase.loading) return [_loading()];
     if (_phase == _Phase.empty) {
+      final hasSuppress = _data['has_suppress'] == true;
+      if (hasSuppress) {
+        return [
+          StateCard(
+            icon: OsIcon.sleep,
+            title: 'No sleep recorded',
+            message: 'Removed sleep blocks are hidden. Undo to let auto '
+                'detection try again.',
+            actionLabel: 'Undo removals',
+            onAction: _undoSuppress,
+          ),
+        ];
+      }
       return [
         StateCard(
           icon: OsIcon.sleep,
@@ -247,6 +297,8 @@ class _SleepDetailScreenState extends State<SleepDetailScreen> {
         onEditTimes: _editSleepTimes,
         onConfirmFallback: _confirmFallback,
         onClearOverride: _clearOverride,
+        onDismissSleep: _dismissSleep,
+        onUndoSuppress: _undoSuppress,
         showSleepCoach: widget.showSleepCoach,
       ),
     ];
@@ -309,6 +361,8 @@ class SleepNightContent extends StatelessWidget {
   final VoidCallback onEditTimes;
   final VoidCallback onConfirmFallback;
   final VoidCallback onClearOverride;
+  final VoidCallback onDismissSleep;
+  final VoidCallback onUndoSuppress;
 
   /// Render the Sleep Coach card (tonight's need/bedtime/wake/alarm) inline,
   /// between the Cycles and Nocturnal-heart sections — it only makes sense
@@ -325,6 +379,8 @@ class SleepNightContent extends StatelessWidget {
     required this.onEditTimes,
     required this.onConfirmFallback,
     required this.onClearOverride,
+    required this.onDismissSleep,
+    required this.onUndoSuppress,
     this.showSleepCoach = false,
   });
 
@@ -347,6 +403,8 @@ class SleepNightContent extends StatelessWidget {
   num? get _efficiency => _num(data['efficiency']); // 0..1
   num? get _regularity => _num(data['regularity']); // 0..100
   bool get _stagesBeta => data['stages_beta'] == true;
+
+  bool get _hasSuppress => data['has_suppress'] == true;
 
   // Where this night's window came from: auto / auto_fallback / manual /
   // confirmed / none. Drives the confirm prompt + the manual-edit affordance.
@@ -492,6 +550,7 @@ class SleepNightContent extends StatelessWidget {
         // Any night can be corrected by hand.
         const SizedBox(height: Sp.x4),
         _editTimesFooter(),
+        if (_hasSuppress) _undoSuppressFooter(),
       ]),
     );
   }
@@ -531,6 +590,16 @@ class SleepNightContent extends StatelessWidget {
             const SizedBox(width: Sp.x3),
             TextButton(onPressed: onEditTimes, child: const Text('Edit')),
           ]),
+          const SizedBox(height: Sp.x2),
+          Center(
+            child: TextButton(
+              onPressed: onDismissSleep,
+              child: Text(
+                'Remove this sleep',
+                style: AppText.caption.copyWith(color: AppColors.inkMuted),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -551,6 +620,7 @@ class SleepNightContent extends StatelessWidget {
           ),
         ),
         TextButton(onPressed: onEditTimes, child: const Text('Edit')),
+        TextButton(onPressed: onDismissSleep, child: const Text('Remove')),
         TextButton(onPressed: onClearOverride, child: const Text('Use auto')),
       ]),
     );
@@ -560,9 +630,30 @@ class SleepNightContent extends StatelessWidget {
   Widget _editTimesFooter() {
     if (_sleepSource != 'auto') return const SizedBox.shrink();
     return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextButton(
+            onPressed: onEditTimes,
+            child: Text('Sleep times look off? Fix them',
+                style: AppText.caption.copyWith(color: AppColors.inkMuted)),
+          ),
+          TextButton(
+            onPressed: onDismissSleep,
+            child: Text('Remove this sleep',
+                style: AppText.caption.copyWith(color: AppColors.inkMuted)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Subtle undo when some blocks were removed but others remain.
+  Widget _undoSuppressFooter() {
+    return Center(
       child: TextButton(
-        onPressed: onEditTimes,
-        child: Text('Sleep times look off? Fix them',
+        onPressed: onUndoSuppress,
+        child: Text('Undo removals',
             style: AppText.caption.copyWith(color: AppColors.inkMuted)),
       ),
     );

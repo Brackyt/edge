@@ -302,12 +302,17 @@ PreparedDerivationPayload prepareDerivationPayload(
   Substrate sub, {
   String? targetDay,
   SleepWindowOverride? override,
+  List<SleepSuppressRange> suppressRanges = const [],
 }) {
   if (sub.isEmpty || sub.lastTs == null) {
     return const PreparedDerivationPayload(dataNowSec: 0, days: []);
   }
   final days = <PreparedDerivationDay>[];
-  for (final day in calendarDays(sub, override: override)) {
+  for (final day in calendarDays(
+    sub,
+    override: override,
+    suppressRanges: suppressRanges,
+  )) {
     if (targetDay != null && day.date != targetDay) continue;
     final daySub = sub.slice(day.startSec, day.endSec);
     final napSub = sub.slice(day.startSec, day.endSec + napBoundaryBufferSec);
@@ -357,9 +362,14 @@ SleepSessionCandidate prepareSleepSessionCandidate(
   Substrate sub, {
   required String targetDay,
   SleepWindowOverride? override,
+  List<SleepSuppressRange> suppressRanges = const [],
 }) {
-  final payload =
-      prepareDerivationPayload(sub, targetDay: targetDay, override: override);
+  final payload = prepareDerivationPayload(
+    sub,
+    targetDay: targetDay,
+    override: override,
+    suppressRanges: suppressRanges,
+  );
   if (payload.days.isEmpty) return SleepSessionCandidate.absent(targetDay);
   final day = payload.days.first;
   return SleepSessionCandidate(

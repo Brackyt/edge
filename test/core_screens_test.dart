@@ -496,6 +496,8 @@ void main() {
                   onEditTimes: () {},
                   onConfirmFallback: () {},
                   onClearOverride: () {},
+                  onDismissSleep: () {},
+                  onUndoSuppress: () {},
                 ),
               ),
             ),
@@ -543,6 +545,8 @@ void main() {
             onEditTimes: () {},
             onConfirmFallback: () {},
             onClearOverride: () {},
+            onDismissSleep: () {},
+            onUndoSuppress: () {},
           ),
         ),
       );
@@ -582,6 +586,8 @@ void main() {
             onEditTimes: () {},
             onConfirmFallback: () {},
             onClearOverride: () {},
+            onDismissSleep: () {},
+            onUndoSuppress: () {},
           ),
         ),
       );
@@ -608,6 +614,8 @@ void main() {
             onEditTimes: () {},
             onConfirmFallback: () => confirmed++,
             onClearOverride: () {},
+            onDismissSleep: () {},
+            onUndoSuppress: () {},
           ),
         ),
       );
@@ -616,6 +624,34 @@ void main() {
       await t.tap(find.text('Looks right'));
       await t.pump(const Duration(milliseconds: 300));
       expect(confirmed, 1);
+    });
+
+    testWidgets('fallback night shows dismiss affordance; dismiss fires', (
+      t,
+    ) async {
+      t.view.physicalSize = const Size(390, 3200);
+      t.view.devicePixelRatio = 1.0;
+      addTearDown(t.view.reset);
+      var dismissed = 0;
+      final data = night()..['sleep_source'] = 'auto_fallback';
+      await t.pumpWidget(
+        _host(
+          SleepNightContent(
+            data: data,
+            date: today(),
+            onEditTimes: () {},
+            onConfirmFallback: () {},
+            onClearOverride: () {},
+            onDismissSleep: () => dismissed++,
+            onUndoSuppress: () {},
+          ),
+        ),
+      );
+      await t.pump(const Duration(milliseconds: 900));
+      expect(find.text('Remove this sleep'), findsOneWidget);
+      await t.tap(find.text('Remove this sleep'));
+      await t.pump(const Duration(milliseconds: 300));
+      expect(dismissed, 1);
     });
   });
 }

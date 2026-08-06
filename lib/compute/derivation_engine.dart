@@ -815,9 +815,11 @@ class DerivationEngine {
       // todo set. (No-raw days are guarded in the per-day loop so we never
       // clobber a good manual result with an empty re-derive once raw is pruned.)
       final overrideDays = await LocalDb.sleepOverrideDays();
+      final suppressDays = await LocalDb.sleepSuppressDays();
+      final userSleepDays = overrideDays.union(suppressDays);
       final todoDays = [
         for (final day in scope.targetDays)
-          if (!finalized.contains(day) || overrideDays.contains(day)) day,
+          if (!finalized.contains(day) || userSleepDays.contains(day)) day,
       ];
       if (todoDays.isEmpty) {
         _log('derive: all days finalized — nothing to do');
@@ -874,7 +876,7 @@ class DerivationEngine {
           // Keep the existing locked result instead.
           if (prepared != null &&
               prepared.daySub.isEmpty &&
-              overrideDays.contains(dayId)) {
+              userSleepDays.contains(dayId)) {
             _log('derive day $dayId skipped: override day, raw pruned — kept');
           } else if (prepared != null) {
             _diag['prepared_days'] = (_diag['prepared_days'] as int) + 1;
@@ -1145,9 +1147,10 @@ class DerivationEngine {
     String dayId, {
     _PrepareStats? stats,
   }) async {
-    // A user sleep override is the source of truth — never serve the cached auto
-    // candidate, and don't cache the override result (so a later edit / clear is
-    // not shadowed by a stale artifact). The auto path keeps its finalized cache.
+    // A user sleep override / suppress is the source of truth — never serve the
+    // cached auto candidate, and don't cache those results (so a later edit /
+    // clear is not shadowed by a stale artifact). The plain auto path keeps its
+    // finalized cache.
     final overrideRow = await LocalDb.getSleepOverride(dayId);
     final override = overrideRow == null
         ? null
@@ -1157,8 +1160,19 @@ class DerivationEngine {
             offsetSec: (overrideRow['offset_ts'] as num).toInt(),
             source: overrideRow['source'] as String? ?? 'manual',
           );
+    final suppressRows = await LocalDb.sleepSuppressRanges(dayId);
+    final suppressRanges = [
+      for (final r in suppressRows)
+        SleepSuppressRange(
+          startSec: (r['start_ts'] as num).toInt(),
+          endSec: (r['end_ts'] as num).toInt(),
+        ),
+    ];
 
-    if (override == null) {
+    // Skip finalized-candidate cache whenever the user has touched this day's
+    // sleep window (override OR suppress). The cache was built without those
+    // ranges; serving it would leave dismissed blocks intact.
+    if (override == null && suppressRanges.isEmpty) {
       final finalized = await LocalDb.finalizedDayIds(kAlgoVersion);
       if (finalized.contains(dayId)) {
         final cached = await LocalDb.sleepSessionCandidate(dayId, kAlgoVersion);
@@ -1240,6 +1254,7 @@ class DerivationEngine {
         searchSub,
         targetDay: dayId,
         override: override,
+        suppressRanges: suppressRanges,
       );
       // Fold the MAIN sleep (most epochs) of a freshly-staged night into the
       // rolling profile — done here in the worker because the observations live
@@ -1285,7 +1300,10 @@ class DerivationEngine {
     }, _perDayTimeout, label: 'sleep-staging $dayId');
     final candidate = SleepSessionCandidate.fromJson(
         (jsonDecode(candidateJson) as Map).cast<String, dynamic>());
-    if (override == null) {
+    // Do not cache override OR suppress results — same reason as the read-side
+    // skip above. Caching a suppressed candidate would make Undo (clear
+    // suppress → re-derive) revive the dismissed windows from the cache.
+    if (override == null && suppressRanges.isEmpty) {
       await LocalDb.putSleepSessionCandidate(
         dayId: dayId,
         algoVersion: kAlgoVersion,
@@ -2177,6 +2195,13 @@ class DerivationEngine {
         date: day.date,
         dayEndSec: day.endSec,
         dataNowSec: dataNowSec,
+        suppressRanges: [
+          for (final r in await LocalDb.sleepSuppressRanges(day.date))
+            SleepSuppressRange(
+              startSec: (r['start_ts'] as num).toInt(),
+              endSec: (r['end_ts'] as num).toInt(),
+            ),
+        ],
       );
       final blocks =
           await _runDayBlocksCancellable(blocksInput, _perDayTimeout);
@@ -3618,10 +3643,12 @@ class DerivationEngine {
     int onsetSec,
     int offsetSec, {
     int? attributionEndSec,
+    List<SleepSuppressRange> suppressRanges = const [],
   }) {
     final periods = <Map<String, dynamic>>[];
     var totalAsleep = 0;
-    if (offsetSec > onsetSec) {
+    if (offsetSec > onsetSec &&
+        !sleepOverlapsSuppress(onsetSec, offsetSec, suppressRanges)) {
       final mainMin = (offsetSec - onsetSec) ~/ 60;
       periods.add({
         'is_main': true,
@@ -3675,13 +3702,15 @@ class DerivationEngine {
             attributionEndSec == null || start < attributionEndSec;
         if (lenMin >= 20 && startsToday) {
           final end = keys[j - 1] * 60 + 60;
-          periods.add({
-            'is_main': false,
-            'start': start,
-            'end': end,
-            'asleep_min': lenMin,
-          });
-          totalAsleep += lenMin;
+          if (!sleepOverlapsSuppress(start, end, suppressRanges)) {
+            periods.add({
+              'is_main': false,
+              'start': start,
+              'end': end,
+              'asleep_min': lenMin,
+            });
+            totalAsleep += lenMin;
+          }
         }
         i = j;
       }
@@ -3700,6 +3729,7 @@ class DerivationEngine {
     int onsetSec,
     int offsetSec, {
     int? attributionEndSec,
+    List<SleepSuppressRange> suppressRanges = const [],
   }) {
     try {
       final n = s.length;
@@ -3725,8 +3755,13 @@ class DerivationEngine {
       // (unbuffered) window finds it independently, so keeping it here too
       // would double-count it.
       final naps = (m.value ?? const []).where((nap) {
+        final napStart = t0 + nap.startSec;
+        final napEnd = t0 + nap.endSec;
+        if (sleepOverlapsSuppress(napStart, napEnd, suppressRanges)) {
+          return false;
+        }
         if (attributionEndSec == null) return true;
-        return t0 + nap.startSec < attributionEndSec;
+        return napStart < attributionEndSec;
       }).toList();
       bundle['naps'] = <String, dynamic>{
         'value': [
@@ -3973,9 +4008,12 @@ class DerivationEngine {
     // it in its own regular window), so both helpers drop anything starting
     // at/after dayEndSec to avoid double-counting.
     bundlePatch['sleep_periods'] =
-        _sleepPeriods(inp.napSub, onset, offset, attributionEndSec: inp.dayEndSec);
+        _sleepPeriods(inp.napSub, onset, offset,
+            attributionEndSec: inp.dayEndSec,
+            suppressRanges: inp.suppressRanges);
     _attachNaps(bundlePatch, scMap, inp.napSub, onset, offset,
-        attributionEndSec: inp.dayEndSec);
+        attributionEndSec: inp.dayEndSec,
+        suppressRanges: inp.suppressRanges);
     // Overrides wake's activity_curve (same value, computed once here).
     bundlePatch['activity_curve'] = _activityCurve(daySub);
     bundlePatch['detected_workouts'] = const <Map<String, dynamic>>[];
@@ -4367,6 +4405,7 @@ class _DayBlocksInput {
   final String date;
   final int dayEndSec;
   final int dataNowSec;
+  final List<SleepSuppressRange> suppressRanges;
   const _DayBlocksInput({
     required this.daySub,
     required this.napSub,
@@ -4385,6 +4424,7 @@ class _DayBlocksInput {
     required this.date,
     required this.dayEndSec,
     required this.dataNowSec,
+    this.suppressRanges = const [],
   });
 }
 

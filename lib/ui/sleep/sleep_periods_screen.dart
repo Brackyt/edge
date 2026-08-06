@@ -74,6 +74,53 @@ class _SleepPeriodsScreenState extends State<SleepPeriodsScreen> {
   int get _needMin => (_num(_data['need_min'])?.toInt()) ?? 480;
   int get _totalAsleep => (_num(_data['total_asleep_min'])?.toInt()) ?? 0;
   bool get _beta => _data['stages_beta'] == true;
+  bool get _hasSuppress => _data['has_suppress'] == true;
+
+  Future<void> _dismissPeriod(Map<String, dynamic> p) async {
+    final onset = _num(p['onset_ts'])?.toInt();
+    final wake = _num(p['wake_ts'])?.toInt();
+    if (onset == null || wake == null || wake <= onset) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove this sleep?'),
+        content: const Text(
+          'This block will be removed. Other sleep on this day can still '
+          'appear if detected.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final app = context.read<AppState>();
+    final start = DateTime.fromMillisecondsSinceEpoch(onset * 1000);
+    final end = DateTime.fromMillisecondsSinceEpoch(wake * 1000);
+    setState(() => _phase = _Phase.loading);
+    try {
+      await app.dismissSleepPeriod(widget.date, start, end);
+    } catch (_) {}
+    if (!mounted) return;
+    await _load();
+  }
+
+  Future<void> _undoSuppress() async {
+    final app = context.read<AppState>();
+    setState(() => _phase = _Phase.loading);
+    try {
+      await app.clearSleepSuppress(widget.date);
+    } catch (_) {}
+    if (!mounted) return;
+    await _load();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -96,14 +143,23 @@ class _SleepPeriodsScreenState extends State<SleepPeriodsScreen> {
               Skeleton.hero(),
               const SizedBox(height: Sp.x3),
               Skeleton.tileRow(rows: 2),
-            ] else if (_phase == _Phase.empty)
-              const StateCard(
-                icon: OsIcon.bedtime,
-                title: 'No sleep detected',
-                message:
-                    'Wear your strap overnight (and through any naps) and sync '
-                    'to see each sleep here.',
-              )
+            ]             else if (_phase == _Phase.empty)
+              _hasSuppress
+                  ? StateCard(
+                      icon: OsIcon.bedtime,
+                      title: 'No sleep detected',
+                      message: 'Removed sleep blocks are hidden. Undo to let '
+                          'auto detection try again.',
+                      actionLabel: 'Undo removals',
+                      onAction: _undoSuppress,
+                    )
+                  : const StateCard(
+                      icon: OsIcon.bedtime,
+                      title: 'No sleep detected',
+                      message:
+                          'Wear your strap overnight (and through any naps) and sync '
+                          'to see each sleep here.',
+                    )
             else if (_phase == _Phase.error)
               StateCard(
                 icon: OsIcon.sync,
@@ -119,6 +175,20 @@ class _SleepPeriodsScreenState extends State<SleepPeriodsScreen> {
                 for (final p in _periods) ...[
                   _periodCard(p),
                   const SizedBox(height: Sp.x3),
+                ],
+                // Undo whenever any dismissals remain — not only the empty state.
+                if (_hasSuppress) ...[
+                  const SizedBox(height: Sp.x2),
+                  Center(
+                    child: TextButton(
+                      onPressed: _undoSuppress,
+                      child: Text(
+                        'Undo removals',
+                        style: AppText.caption
+                            .copyWith(color: AppColors.inkMuted),
+                      ),
+                    ),
+                  ),
                 ],
               ]),
           ],
@@ -240,6 +310,17 @@ class _SleepPeriodsScreenState extends State<SleepPeriodsScreen> {
             const SizedBox(height: Sp.x3),
             _stageBars(stages),
           ],
+          const SizedBox(height: Sp.x2),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: () => _dismissPeriod(p),
+              child: Text(
+                'Remove',
+                style: AppText.caption.copyWith(color: AppColors.inkMuted),
+              ),
+            ),
+          ),
         ],
       ),
     );

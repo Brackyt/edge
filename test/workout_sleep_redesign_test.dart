@@ -206,6 +206,8 @@ void main() {
             onEditTimes: () {},
             onConfirmFallback: () {},
             onClearOverride: () {},
+            onDismissSleep: () {},
+            onUndoSuppress: () {},
           ),
           palette: p,
         );

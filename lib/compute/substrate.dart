@@ -399,6 +399,32 @@ class PhysioDay {
 /// cannot drift apart again.
 const int kNocturnalSearchLookbackSec = 12 * 3600;
 
+/// Whether two half-open epoch-second intervals overlap.
+bool sleepIntervalsOverlap(int startA, int endA, int startB, int endB) =>
+    startA < endB && endA > startB;
+
+/// A user-dismissed sleep window — any candidate overlapping it is dropped on
+/// re-derive.
+class SleepSuppressRange {
+  final int startSec;
+  final int endSec;
+
+  const SleepSuppressRange({required this.startSec, required this.endSec});
+}
+
+bool sleepOverlapsSuppress(
+  int startSec,
+  int endSec,
+  List<SleepSuppressRange> ranges,
+) {
+  for (final r in ranges) {
+    if (sleepIntervalsOverlap(startSec, endSec, r.startSec, r.endSec)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /// A user-asserted sleep window for one day — manual entry (Approach 1) or a
 /// confirmation of the HR-led fallback (Approach 2). Passed into [calendarDays]
 /// so it overrides auto detection for the matching [dayId].
@@ -446,6 +472,7 @@ String localDateLabel(int epochSec) {
 List<PhysioDay> calendarDays(
   Substrate sub, {
   SleepWindowOverride? override,
+  List<SleepSuppressRange> suppressRanges = const [],
   int Function(int epochSec)? tzOffsetAt,
 }) {
   final tzOffset = tzOffsetAt ?? tzOffsetSecondsAt;
@@ -567,17 +594,26 @@ List<PhysioDay> calendarDays(
 
       if (s.present && s.window != null) {
         final offSec = s.window!.offsetMs! ~/ 1000;
+        final onsetSec = s.window!.onsetMs == null
+            ? 0
+            : (s.window!.onsetMs! / 1000).round();
+        final userSet = ov != null;
+        final suppressed = !userSet &&
+            onsetSec > 0 &&
+            offSec > onsetSec &&
+            sleepOverlapsSuppress(
+              onsetSec,
+              offSec,
+              suppressRanges,
+            );
         // Auto/fallback: attribute only if the wake lands in this calendar day.
         // Manual/confirmed: trust the user — attribute to the day they set it on.
-        final userSet = ov != null;
-        if (userSet || (offSec >= dayStart && offSec < dayEnd)) {
+        if (!suppressed &&
+            (userSet || (offSec >= dayStart && offSec < dayEnd))) {
           seg = s;
           sleepLo = loS + s.window!.onsetIdx;
           sleepHi = loS + s.window!.offsetIdx;
           sleepSource = src;
-          final onsetSec = s.window!.onsetMs == null
-              ? 0
-              : (s.window!.onsetMs! / 1000).round();
           if (onsetSec > 0 && offSec > onsetSec) {
             sleepHistory.add((
               startSec: onsetSec,

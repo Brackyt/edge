@@ -1310,14 +1310,52 @@ class AppState extends ChangeNotifier {
     await _reanalyzeForOverride();
   }
 
-  /// Remove a manual/confirmed override for [date] — revert to auto/fallback.
+  /// Remove a manual/confirmed override for [date] — revert to auto detection.
   Future<void> clearSleepOverride(String date) async {
     await LocalDb.deleteSleepOverride(date);
     await _reanalyzeForOverride();
   }
 
-  /// Force-derive after a sleep-override change so the affected day restages from
-  /// the user's window (the engine force-includes override days even if locked).
+  /// Dismiss one sleep block for [date] — suppresses that window on re-derive.
+  /// If a manual/confirmed override overlaps the window, it is cleared too.
+  Future<void> dismissSleepPeriod(
+    String date,
+    DateTime start,
+    DateTime end,
+  ) async {
+    final startSec = start.millisecondsSinceEpoch ~/ 1000;
+    final endSec = end.millisecondsSinceEpoch ~/ 1000;
+    if (endSec <= startSec) return;
+    await LocalDb.putSleepSuppress(
+      dayId: date,
+      startTs: startSec,
+      endTs: endSec,
+    );
+    final override = await LocalDb.getSleepOverride(date);
+    if (override != null) {
+      final onset = (override['onset_ts'] as num).toInt();
+      final offset = (override['offset_ts'] as num).toInt();
+      if (startSec < offset && endSec > onset) {
+        await LocalDb.deleteSleepOverride(date);
+      }
+    }
+    await _reanalyzeForOverride();
+  }
+
+  /// Undo all per-window dismissals for [date].
+  ///
+  /// Force-rederives [date] specifically: after clear, the day is no longer in
+  /// [LocalDb.sleepSuppressDays], so a plain `_reanalyzeForOverride` (which only
+  /// force-includes days still in that set / override days) would skip a
+  /// finalized day and leave day_result suppressed.
+  Future<void> clearSleepSuppress(String date) async {
+    await LocalDb.clearSleepSuppress(date);
+    await reanalyzeDays({date});
+  }
+
+  /// Force-derive after a sleep override/suppress change so affected days restage.
+  /// Dismiss keeps the day in [LocalDb.sleepSuppressDays], so `run(force: true)`
+  /// force-includes it even when finalized (see DerivationEngine todo filter).
   Future<void> _reanalyzeForOverride() async {
     if (reanalyzing) return;
     reanalyzing = true;

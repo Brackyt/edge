@@ -91,7 +91,7 @@ class LocalDb {
   /// pass it: sqflite throws `ArgumentError('onCreate must be null if no
   /// version is specified')` BEFORE opening anything when `onCreate` is given
   /// without `version` (sqflite_common database_mixin.dart).
-  static const int schemaVersion = 26;
+  static const int schemaVersion = 27;
 
   /// SQLite caps host parameters per statement (`SQLITE_MAX_VARIABLE_NUMBER` —
   /// only 999 on the builds shipped with older Android/iOS). Any `IN (?, ?, …)`
@@ -163,6 +163,7 @@ class LocalDb {
         await _createLiveCoverage(db);
         await _createWorkoutSuggestions(db);
         await _createSleepOverride(db);
+        await _createSleepSuppress(db);
         await _createWorkoutRoute(db);
         await _createNotifFired(db);
         await _ensureCoachViews(db);
@@ -391,11 +392,17 @@ class LocalDb {
           // use by FiredKeyStore, so nothing is lost on upgrade.
           await _createNotifFired(db);
         }
+        if (oldV < 27) {
+          // Per-window sleep dismissals — user removes one bogus block without
+          // wiping the whole calendar day. Re-derive drops candidates overlapping
+          // these ranges; additive, no backfill needed.
+          await _createSleepSuppress(db);
+        }
       },
       onOpen: (db) async {
         await _repairOpenSchema(db);
       },
-      version: 26,
+      version: 27,
     );
   }
 
@@ -440,6 +447,7 @@ class LocalDb {
     await _ensureSyncStateSchema(db);
     await _createWorkoutSuggestions(db);
     await _createSleepOverride(db);
+    await _createSleepSuppress(db);
     await _createWorkoutRoute(db);
     await _ensureWorkoutRouteSpeed(db);
     await _ensureDayResultSkippedColumn(db);
@@ -559,13 +567,14 @@ class LocalDb {
   }
 
   // ── SLEEP OVERRIDE (manual / confirmed sleep windows) ───────────────────────
-  // The user's word on when they slept — either typed in manually (Approach 1)
-  // or a confirmation of the HR-led fallback's proposal (Approach 2). Stored
+  // The user's word on when they slept — typed manually (Approach 1) or a
+  // confirmation of the HR-led fallback's proposal (Approach 2). Stored
   // SEPARATELY from the derived day_result so it survives finalization AND any
   // kAlgoVersion bump: the engine re-applies it on every derive of that day.
   //   source: 'manual'    — user typed the times
   //           'confirmed' — user accepted the fallback's proposed window
   // Times are epoch SECONDS (phone clock; raw rec_ts is SET_CLOCK'd to match).
+  // Bogus auto-detected blocks are dismissed via [sleep_suppress], not here.
   /// The cross-isolate fire-once claim ledger for notification dedupeKeys.
   ///
   /// SharedPreferences CANNOT enforce fire-once across isolates, however fresh
@@ -686,6 +695,24 @@ class LocalDb {
     ''');
   }
 
+  /// Per-window sleep dismissals for [dayId]. Re-derive drops any main-sleep or
+  /// nap candidate overlapping one of these ranges; other windows on the same
+  /// calendar day can still win.
+  static Future<void> _createSleepSuppress(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS sleep_suppress (
+        id INTEGER PRIMARY KEY,
+        day_id TEXT NOT NULL,
+        start_ts INTEGER NOT NULL,
+        end_ts INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_sleep_suppress_day ON sleep_suppress(day_id)',
+    );
+  }
+
   /// Upsert the user's sleep window for [dayId] (local date label). [source] is
   /// 'manual' or 'confirmed'. Replaces any prior override for that day.
   static Future<void> putSleepOverride({
@@ -714,6 +741,54 @@ class LocalDb {
       limit: 1,
     );
     return rows.isEmpty ? null : rows.first;
+  }
+
+  /// Record a dismissed sleep window for [dayId]. Overlapping candidates are
+  /// dropped on the next derive.
+  static Future<int> putSleepSuppress({
+    required String dayId,
+    required int startTs,
+    required int endTs,
+  }) async {
+    final db = await instance;
+    return db.insert('sleep_suppress', {
+      'day_id': dayId,
+      'start_ts': startTs,
+      'end_ts': endTs,
+      'created_at': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    });
+  }
+
+  /// All suppress ranges for [dayId], ordered by start.
+  static Future<List<Map<String, dynamic>>> sleepSuppressRanges(
+    String dayId,
+  ) async {
+    final db = await instance;
+    return db.query(
+      'sleep_suppress',
+      where: 'day_id = ?',
+      whereArgs: [dayId],
+      orderBy: 'start_ts ASC',
+    );
+  }
+
+  /// Remove one suppress row by [id].
+  static Future<void> deleteSleepSuppress(int id) async {
+    final db = await instance;
+    await db.delete('sleep_suppress', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// Undo all dismissals for [dayId].
+  static Future<void> clearSleepSuppress(String dayId) async {
+    final db = await instance;
+    await db.delete('sleep_suppress', where: 'day_id = ?', whereArgs: [dayId]);
+  }
+
+  /// Every day that currently has suppress rows — force-derived like overrides.
+  static Future<Set<String>> sleepSuppressDays() async {
+    final db = await instance;
+    final rows = await db.query('sleep_suppress', columns: ['day_id']);
+    return {for (final r in rows) r['day_id'] as String};
   }
 
   /// Remove the override for [dayId] (revert to auto detection).

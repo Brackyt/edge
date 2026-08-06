@@ -555,8 +555,13 @@ class LocalRepositoryImpl extends LocalRepository {
     // Provenance of this day's sleep window: auto / auto_fallback / manual /
     // confirmed / none — drives the Sleep screen's confirm prompt + edit affordance.
     final sleepSource = (b['sleep_source'] as String?) ?? 'auto';
+    final hasSuppress = (await LocalDb.sleepSuppressRanges(date)).isNotEmpty;
     if (tst == null) {
-      return {'has_sleep': false, 'sleep_source': sleepSource};
+      return {
+        'has_sleep': false,
+        'sleep_source': sleepSource,
+        'has_suppress': hasSuppress,
+      };
     }
     final spt = (win?['spt_sec'] as num?);
     final waso = (acct?['waso_sec'] as num?);
@@ -606,8 +611,11 @@ class LocalRepositoryImpl extends LocalRepository {
       'regularity':
           null, // needs ≥several nights (honest null → "Need N nights")
       // Sleep periods (main + naps) for the periods screen.
-      'periods': (b['sleep_periods'] as Map?)?['periods'] ?? const [],
+      'periods': _mapSleepPeriods(
+        (b['sleep_periods'] as Map?)?['periods'],
+      ),
       'total_asleep_min': (b['sleep_periods'] as Map?)?['total_asleep_min'],
+      'has_suppress': hasSuppress,
       // Sleep cycles — Rosenblum 2024 "fractal cycles" (HRV-adapted): peak-to-
       // peak of the smoothed per-minute RMSSD series (REM peaks / NREM troughs).
       'cycles': _sub(b, 'sleep')?['cycles'] ?? const [],
@@ -623,6 +631,30 @@ class LocalRepositoryImpl extends LocalRepository {
       // position PROXY, NOT supine/side/prone body position.
       'wrist_orientation': b['wrist_orientation'],
     };
+  }
+
+  /// Map derivation sleep_periods rows to the screen contract.
+  List<Map<String, dynamic>> _mapSleepPeriods(Object? raw) {
+    if (raw is! List) return const [];
+    final out = <Map<String, dynamic>>[];
+    for (final p in raw) {
+      if (p is! Map) continue;
+      final m = p.cast<String, dynamic>();
+      final start = m['start'] as num?;
+      final end = m['end'] as num?;
+      final asleep = m['asleep_min'] as num?;
+      out.add({
+        'is_main': m['is_main'] == true,
+        'onset_ts': start?.toInt(),
+        'wake_ts': end?.toInt(),
+        'duration_min': asleep?.toInt(),
+        if (m['efficiency'] != null) 'efficiency': m['efficiency'],
+        if (m['confidence'] != null) 'confidence': m['confidence'],
+        if (m['stages'] != null) 'stages': m['stages'],
+        if (m['hypnogram'] != null) 'hypnogram': m['hypnogram'],
+      });
+    }
+    return out;
   }
 
   /// Mean completed-cycle length (min), or null when no cycles.
